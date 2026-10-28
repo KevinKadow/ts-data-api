@@ -6,7 +6,7 @@ import { dataSources } from "../../mdb";
 import { defaultSchema } from "./utils";
 
 const schema = defaultSchema.extend({
-  pipeline: z.array(z.record(z.unknown())),
+  pipeline: z.array(z.record(z.string(), z.unknown())),
 });
 
 export const method = "post";

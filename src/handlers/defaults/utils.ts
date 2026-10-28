@@ -13,5 +13,5 @@ export const defaultSchema = z.object({
   dataSource: DataSourcesNamesSchema,
   database: z.string(),
   collection: z.string(),
-  options: z.record(z.unknown()).optional(),
+  options: z.record(z.string(), z.unknown()).optional(),
 });

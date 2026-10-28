@@ -1,3 +1,4 @@
+import { authenticateReader } from "../routes/readers";
 import * as h3 from "h3";
 import { verify, VerifyErrors } from "jsonwebtoken";
 
@@ -18,9 +19,13 @@ export const Errors = {
   },
 };
 
-type IsAuthenticated = (event: h3.H3Event) => void | never;
+type IsAuthenticated = (event: h3.H3Event) => Promise<void>;
 
-export const isAuthenticated: IsAuthenticated = (event) => {
+export const isAuthenticated: IsAuthenticated = async (event) => {
+  if (event.path.startsWith("/reader/")) {
+    await authenticateReader(event);
+    return;
+  }
   const authorization = h3.getHeader(event, "Authorization");
 
   if (authorization == null) throw Errors.noHeader();

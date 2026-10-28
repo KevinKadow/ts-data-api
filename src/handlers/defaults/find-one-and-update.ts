@@ -7,8 +7,8 @@ import { dataSources } from "../../mdb";
 import { defaultSchema } from "./utils";
 
 const schema = defaultSchema.extend({
-  filter: z.record(z.unknown()),
-  update: z.union([z.record(z.unknown()), z.array(z.unknown())]),
+  filter: z.record(z.string(), z.unknown()),
+  update: z.union([z.record(z.string(), z.unknown()), z.array(z.unknown())]),
 });
 
 export const method = "post";

@@ -1,3 +1,4 @@
+import { startReaderSync } from "./reader-sync";
 import { envs } from "./envs";
 import { dataSourcesNames } from "./mdb";
 
@@ -10,3 +11,5 @@ app.listen(envs.SERVER_PORT, envs.SERVER_ADDRESS, () => {
 
   console.log(message);
 });
+
+startReaderSync();

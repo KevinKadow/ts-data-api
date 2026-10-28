@@ -462,3 +462,7 @@ Ensure your `dataSource` field matches one of the configured data source names.
 4. **Limit Results**: Use `limit` and `skip` options for pagination
 5. **Handle Errors**: Implement proper error handling for all API calls
 6. **Secure Tokens**: Keep JWT tokens secure and implement proper token refresh mechanisms
+
+## Restricted reader endpoints
+
+See [READER_API.md](READER_API.md) for the separately authenticated /reader/v1 configuration, card lookup, snapshot, enrollment and event contracts. Reader certificates do not grant generic query access.

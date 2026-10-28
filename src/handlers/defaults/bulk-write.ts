@@ -7,7 +7,7 @@ import { AnyBulkWriteOperation } from "mongodb";
 import { defaultSchema } from "./utils";
 
 const schema = defaultSchema.extend({
-  operations: z.array(z.record(z.unknown())),
+  operations: z.array(z.record(z.string(), z.unknown())),
 });
 
 export const method = "post";
