@@ -6,6 +6,10 @@ This project provides a TypeScript implementation inspired by the deprecated [At
 - Endpoint request bodies mirror the structure of the [MongoDB Node.js Driver](https://mongodb.github.io/node-mongodb-native/) methods, with the addition of `dataSource`, `database`, and `collection` fields to specify the target, similar to the Atlas Data API.
 - For detailed usage examples and endpoints, refer to the: `test/client.ts`, `test/custom/*`, `test/default/*` or the [Endpoints documentation](./ENDPOINTS.md).
 
+## Makerspace NFC readers
+
+Restricted device endpoints, mTLS gateway authentication, enrollment, tool grants and audit replay are documented in [READER_API.md](READER_API.md). The generic JWT/full-access behavior described below applies to legacy endpoints, not reader certificates.
+
 ## Executing
 
 To run this application, ensure you have [Node.js](https://nodejs.org/en/download) installed. Then, execute the following commands in the project's root directory:

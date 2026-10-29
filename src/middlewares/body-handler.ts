@@ -1,5 +1,5 @@
 import * as h3 from "h3";
-import { type z } from "zod";
+import { z } from "zod";
 import { getBodyParser } from "../utils";
 
 export const Errors = {
@@ -11,7 +11,7 @@ export const Errors = {
   },
   wrongBody: (zodError: z.ZodError) => {
     return h3.createError({
-      message: `Body expected not provided: ${JSON.stringify(zodError.flatten().fieldErrors)}`,
+      message: `Body expected not provided: ${JSON.stringify(z.flattenError(zodError).fieldErrors)}`,
       status: 400,
     });
   },

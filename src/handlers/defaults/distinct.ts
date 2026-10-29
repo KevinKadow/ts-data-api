@@ -7,7 +7,7 @@ import { defaultSchema } from "./utils";
 
 const schema = defaultSchema.extend({
   key: z.string(),
-  filter: z.record(z.unknown()).optional(),
+  filter: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const method = "post";
