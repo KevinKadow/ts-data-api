@@ -155,7 +155,7 @@ test("events are idempotent and conflicting replays fail", async () => {
     .findOne({});
   expect(stored!.timeOf).toBeInstanceOf(Date);
 });
-test("snapshot excludes superseded/revoked checkouts and unavailable tools", async () => {
+test("snapshot excludes superseded/revoked checkouts and retains outage grants", async () => {
   const db = client.db("reader_test"),
     tool = new ObjectId(),
     shop = new ObjectId();
@@ -183,7 +183,7 @@ test("snapshot excludes superseded/revoked checkouts and unavailable tools", asy
   await db
     .collection("tools")
     .updateOne({ _id: tool }, { $set: { out_of_service: true } });
-  expect((await call("/reader/v1/snapshot")).body.grants).toHaveLength(0);
+  expect((await call("/reader/v1/snapshot")).body.grants).toHaveLength(1);
 });
 test("disabled or unknown certificates cannot read keys", async () => {
   expect(
@@ -319,4 +319,28 @@ test("duplicate UID and cache overflow fail instead of silently truncating acces
       })),
     );
   expect((await call("/reader/v1/snapshot")).status).toBe(409);
+});
+
+test("tool outage retains grants and exposes scoped kick permission", async () => {
+  const db=client.db("reader_test"), shopId=new ObjectId(), toolId=new ObjectId();
+  await db.collection("shops").insertOne({_id:shopId,name:"Wood",out_of_service:true});
+  await db.collection("tools").insertOne({_id:toolId,shop_id:shopId,name:"Saw",out_of_service:false});
+  await db.collection("nfc_readers").updateOne({_id:readerId},{$set:{role:"tool",toolId}});
+  await db.collection("members").updateOne({_id:memberId},{$set:{firstname:"Ada",lastname:"Lovelace",role:"resource_manager",resource_manager_shop_ids:[shopId.toString()]}});
+  await db.collection("tool_checkouts").insertOne({tool_id:toolId,member_id:memberId,expires_on:null});
+  const response=await call("/reader/v1/snapshot");
+  expect(response.status).toBe(200);
+  expect(response.body.tool).toMatchObject({enabled:true,available:false,shopOutOfService:true,toolOutOfService:false});
+  expect(response.body.grants).toHaveLength(1);
+  expect(response.body.cards[0]).toMatchObject({firstName:"Ada",lastInitial:"L",managesTool:true});
+  await db.collection("members").updateOne({_id:memberId},{$set:{resource_manager_shop_ids:[]}});
+  expect((await call("/reader/v1/cards/lookup",{uid:"00112233"})).body.document.managesTool).toBe(false);
+});
+test("checkend persists actor and rejects changed replay", async () => {
+  const document={_id:new ObjectId().toString(),checkinId:new ObjectId().toString(),uid:"00112233",holder:"Test Member",validity:"activeMember",reader:"test-reader",where:"doorboto32",time:Date.now(),reason:"kicked",kicked:true,kickedBy:{memberId:memberId.toString(),uid:"11223344",holder:"Actor"}};
+  expect((await call("/reader/v1/events",{collection:"checkend",document})).status).toBe(200);
+  expect((await call("/reader/v1/events",{collection:"checkend",document})).status).toBe(200);
+  expect(await client.db("reader_test").collection("checkend").countDocuments()).toBe(1);
+  expect((await call("/reader/v1/events",{collection:"checkend",document:{...document,kickedBy:{...document.kickedBy,holder:"Changed"}}})).status).toBe(409);
+  expect((await call("/reader/v1/events",{collection:"checkend",document:{...document,_id:new ObjectId().toString(),kickedBy:null}})).status).toBe(422);
 });

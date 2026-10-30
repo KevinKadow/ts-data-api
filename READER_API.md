@@ -26,7 +26,7 @@ The management browser's compiled-in username/password authenticates to the ESP3
 | SERVER_ADDRESS | Existing default 127.0.0.1 | Keep private behind the trusted gateway |
 | SERVER_PORT | Existing default 8080 | Internal HTTP listener |
 
-READER_MQTT_URL enables a database change-stream worker. It watches cards, members, tools, shops, tool_checkouts, nfc_card_credentials and nfc_readers, publishing non-retained QoS 1 readers/all/invalidate hints. It reconnects after errors; missed hints recover through firmware's five-minute snapshots. Only publish the hint while connected, avoiding an unbounded offline MQTT queue. MongoDB must be Atlas or a replica set for enrollment transactions and change streams.
+READER_MQTT_URL enables a database change-stream worker. It watches cards, members, tools, shops, tool_checkouts, nfc_card_credentials and nfc_readers, publishing non-retained QoS 1 scoped tool/shop document hints and readers/all/invalidate hints for other authorization changes. It reconnects after errors; missed hints recover through firmware's configurable snapshots (15 minutes by default). Only publish the hint while connected, avoiding an unbounded offline MQTT queue. MongoDB must be Atlas or a replica set for enrollment transactions and change streams.
 
 Keep all credentials in deployment secrets. Rotate certificates by replacing certificateFingerprint on the same reader ObjectId and deploying the new certificate/key; queued event identities remain stable. Changing the server encryption key requires an explicit decrypt/re-encrypt migration, not merely changing the environment value.
 
@@ -75,13 +75,13 @@ UIDs preserve leading zeroes and must be uppercase hexadecimal of 4, 7 or 10 byt
 
 A card view includes _id, uid, holder, validity, expiry, memberId and credential. Only an active credential matching card ObjectId, UID and member assignment supplies keyA, digest and version; Key B is never returned by ordinary lookup/snapshot. Effective validity checks both card and current member status; effective expiry is the earlier of their expirations.
 
-Snapshots contain at most 300 cards and 150 current grants. Tool grants exclude revoked/superseded/expired checkouts and require an available tool and shop. Null expires_on is non-expiring; a checkout date expires at the start of the following day in America/New_York, including DST.
+Snapshots contain at most 300 cards and 150 current grants. Tool grants exclude revoked/superseded/expired checkouts and require enabled tool/shop records; out-of-service flags do not remove grants. Null expires_on is non-expiring; a checkout date expires at the start of the following day in America/New_York, including DST.
 
 Enrollment stores random pending material encrypted with AES-GCM in nfc_card_credentials. Retries reuse that material. Begin/commit transactions fence the station and card against concurrent disable or reassignment. Commit trusts readback attestation from the authorized station; it does not independently prove physical RF communication. A released/reassigned UID must never reuse another card document's credential. Retire orphan credential records only through an explicit operator process after reviewing pending enrollments; no automatic destructive cleanup runs.
 
 ## Events and MQTT
 
-collection is restricted to checkins or rejections. document requires _id (24 hex), uid, holder (string/null), validity, reader, where, time (epoch milliseconds) and optional reason. The service derives BSON ObjectId/Double/Int32/Date fields and the immutable authenticated deviceId. timeOf comes from time; timeQuality is trusted or unavailable. A pre-time rejection uses time=0 and timeOf=null. delay is always Int32(0).
+collection is restricted to checkins, checkend or rejections. document requires _id (24 hex), uid, holder (string/null), validity, reader, where, time (epoch milliseconds) and optional reason. The service derives BSON ObjectId/Double/Int32/Date fields and the immutable authenticated deviceId. timeOf comes from time; timeQuality is trusted or unavailable. A pre-time rejection uses time=0 and timeOf=null. delay is always Int32(0).
 
 Identical retries acknowledge the same _id; conflicting replays return 409 and do not overwrite the record. Older registered station names remain valid for delayed records. No arbitrary database, collection, filter, update operator or member status is accepted from readers.
 
@@ -107,3 +107,23 @@ npm audit --omit=dev reports **zero vulnerabilities**. The full audit still repo
 
 Deploy API/indexes/gateway/broker policy first, then provision bench readers, then the separately secured production firmware. Rails inventory updates describe this companion integration; no Rails/React endpoint or generated client release is changed. The held wiki draft must be reviewed and published with the actual deployment.
 
+
+
+## Tool-session contract extension
+
+Deploy this gateway before the session-capable firmware. Cards expose firstName,
+lastInitial and managesTool (admin/board or resource_manager assigned to this
+reader's shop). Snapshot and lookup responses include tool enabled, shopId,
+shopName, toolOutOfService and shopOutOfService. Existing available remains false
+on an outage, but valid grants remain present so current sessions can continue.
+Tool/shop change-stream messages publish scoped tools/<operation> and
+shops/<operation> document hints, without generic stop-all invalidations.
+
+Events additionally accept collection checkend. Tool event context has string
+memberId/toolId/shopId/toolName/shopName fields. Checkend requires checkinId,
+kicked and, for a kick, kickedBy containing memberId, uid and holder; non-kicks
+store kickedBy=null. These fields participate in immutable replay validation.
+Unknown reboot ending times use time=0. Tool checkins and checkends publish to
+activity/checkins/<SHOP>/<TOOL> and activity/checkends/<SHOP>/<TOOL>, respectively.
+Topic segments percent-escape %, /, + and #. Update broker ACLs before rollout.
+No environment variables or Rails/React API client changes are required.

@@ -40,10 +40,14 @@ export function startReaderSync() {
               },
             },
           },
-        ]);
+        ], {fullDocument: "updateLookup"});
         try {
           for await (const change of stream) {
-            if (change) publish();
+            if (change && "ns" in change && "coll" in change.ns && ["tools","shops"].includes(change.ns.coll)) {
+              const doc = "fullDocument" in change && change.fullDocument || ("documentKey" in change ? change.documentKey : {});
+              if (client.connected) client.publish(change.ns.coll + "/" + change.operationType,
+                JSON.stringify({document:doc}),{qos:1,retain:false});
+            } else if (change) publish();
           }
         } finally {
           await stream.close();

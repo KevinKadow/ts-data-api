@@ -180,7 +180,18 @@ readerRouter.post(
     });
   }),
 );
-async function cardView(c: any) {
+async function readerScope(reader: any) {
+  const tool = reader.toolId ? await db().collection("tools").findOne({_id:reader.toolId}) : null;
+  return {...reader, shopId: tool?.shop_id?.toString()};
+}
+async function toolStatus(reader: any) {
+  const tool = reader.toolId ? await db().collection("tools").findOne({_id:reader.toolId}) : null;
+  const shop = tool ? await db().collection("shops").findOne({_id:tool.shop_id}) : null;
+  return { enabled: !!tool && !!shop && !tool.disabled && !shop.disabled,
+    name: boundedText(tool?.name,96), shopId: shop?._id.toString() || "", shopName: boundedText(shop?.name,96),
+    toolOutOfService: !!tool?.out_of_service, shopOutOfService: !!shop?.out_of_service };
+}
+async function cardView(c: any, reader?: any) {
   const member = await db().collection("members").findOne({ _id: c.member_id });
   const credential = await db().collection("nfc_card_credentials").findOne({
     _id: c._id,
@@ -193,6 +204,10 @@ async function cardView(c: any) {
     _id: c._id.toString(),
     uid: c.uid,
     holder: boundedText(c.holder, 256),
+    firstName: boundedText(member?.firstname, 64),
+    lastInitial: boundedText(Array.from(String(member?.lastname || ""))[0] || "", 4),
+    managesTool: !!reader && (member?.role === "admin" || member?.role === "board_member" ||
+      (member?.role === "resource_manager" && (member.resource_manager_shop_ids || []).map(String).includes(reader.shopId))),
     ...effectiveCard(c, member),
     memberId: c.member_id?.toString(),
     credential: material
@@ -208,7 +223,7 @@ readerRouter.post(
   "/reader/v1/cards/lookup",
   h3.defineEventHandler(async (e) => {
     const c = await cardFor((await body(e)).uid);
-    return { document: c ? await cardView(c) : null, serverTime: Date.now() };
+    return { document: c ? await cardView(c, await readerScope(e.context.reader)) : null, tool: await toolStatus(e.context.reader), serverTime: Date.now() };
   }),
 );
 readerRouter.get(
@@ -220,8 +235,9 @@ readerRouter.get(
       new Set(rows.map((c) => c.uid)).size !== rows.length
     )
       fail(409, "Card cache capacity or duplicate UID violation");
+    const scope = await readerScope(e.context.reader);
     const cards = await Promise.all(
-      rows.filter((c) => validUid(c.uid)).map(cardView),
+      rows.filter((c) => validUid(c.uid)).map(c => cardView(c, scope)),
     );
     let grants: any[] = [],
       available = false,
@@ -240,7 +256,7 @@ readerRouter.get(
         !tool.out_of_service &&
         !shop.out_of_service;
       toolName = boundedText(tool?.name, 96);
-      if (available) {
+      if (tool && shop && !tool.disabled && !shop.disabled) {
         const rows = await db().collection("tool_checkouts").find({
           tool_id: tool!._id,
           revoked_at: null,
@@ -267,7 +283,7 @@ readerRouter.get(
       config: config(e.context.reader),
       cards,
       grants,
-      tool: { available, name: toolName },
+      tool: { ...(await toolStatus(e.context.reader)), available, name: toolName },
       serverTime: Date.now(),
     };
   }),
@@ -414,7 +430,7 @@ readerRouter.post(
     const b = await body(e),
       d = b.document;
     if (
-      !["checkins", "rejections"].includes(b.collection) ||
+      !["checkins", "checkend", "rejections"].includes(b.collection) ||
       !d ||
       !/^[0-9a-f]{24}$/i.test(d._id || "") ||
       !Number.isSafeInteger(d.time) ||
@@ -437,7 +453,25 @@ readerRouter.post(
       d.where !== (e.context.reader.where || "doorboto32")
     )
       fail(403, "Reader identity mismatch");
+    const extra: Record<string, any> = {};
+    for (const key of ["memberId","toolId","shopId","toolName","shopName"]) {
+      if (d[key] !== undefined) {
+        if (typeof d[key] !== "string" || d[key].length > 256) fail(422,"Invalid tool event context");
+        extra[key] = d[key];
+      }
+    }
+    if (b.collection === "checkend") {
+      if (!/^[0-9a-f]{24}$/i.test(d.checkinId || "") || typeof d.kicked !== "boolean") fail(422,"Invalid checkend");
+      extra.checkinId=d.checkinId; extra.kicked=d.kicked; extra.kickedBy=null;
+      if (d.kicked) {
+        const actor=d.kickedBy;
+        if (!actor || typeof actor.memberId !== "string" || !/^[0-9a-f]{24}$/i.test(actor.memberId) || typeof actor.holder !== "string" || actor.holder.length>256) fail(422,"Invalid kick actor");
+        uid(actor.uid);
+        extra.kickedBy={memberId:actor.memberId,uid:actor.uid,holder:actor.holder};
+      }
+    }
     const document = {
+      ...extra,
       _id: new ObjectId(d._id),
       uid: d.uid,
       holder: d.holder,
@@ -462,7 +496,7 @@ readerRouter.post(
         existing.holder !== document.holder ||
         existing.reason !== document.reason ||
         existing.reader !== document.reader ||
-        existing.where !== document.where)
+        existing.where !== document.where || Object.keys(extra).some(key => JSON.stringify(existing[key]) !== JSON.stringify(extra[key])))
     )
       fail(409, "Conflicting event ID");
     if (!existing) {
