@@ -127,3 +127,94 @@ Unknown reboot ending times use time=0. Tool checkins and checkends publish to
 activity/checkins/<SHOP>/<TOOL> and activity/checkends/<SHOP>/<TOOL>, respectively.
 Topic segments percent-escape %, /, + and #. Update broker ACLs before rollout.
 No environment variables or Rails/React API client changes are required.
+
+
+## Required checkend uniqueness deployment
+
+Before deploying the reviewed gateway, run node scripts/reader-indexes.cjs against
+the intended database. It adds the unique partial index one_end_per_reader_checkin
+on (deviceId, checkinId). Existing duplicate endings cause index creation to fail;
+the task never deletes or merges audit data. Review any duplicates before retrying.
+The gateway also looks up session identity before insertion, acknowledges concurrent
+identical retries, and rejects alternate IDs or omitted/changed immutable context.
+The index is necessary to enforce uniqueness across concurrent requests/processes.
+
+.github/workflows/test.yml builds TypeScript and runs the complete disposable
+MongoDB replica-set suite on every push and pull request, without production
+credentials. Tests explicitly deploy the unique index on their disposable database.
+No new environment variables are introduced.
+
+MQTT reconnect and change-stream recovery now publish readers/all/refresh; allow reader subscriptions to this topic before rollout. Only actual authorization changes publish readers/all/invalidate. Scoped tool/shop changes remain refresh hints.
+
+## Optional Tool reservation protocol
+
+Deploy Rails lifecycle/schema support first, then this API and
+`scripts/reader-indexes.cjs`, broker ACLs, React, and finally enabled readers.
+Preserve the existing event-ingestion and authorization behavior.
+
+Set `READER_RAILS_URL` to the private Rails origin and
+`READER_RESERVATION_SERVICE_SECRET` to the same >=32-character secret configured
+on Rails. Readers receive neither this secret nor general database access.
+Restrict the Rails route to API ingress; use TLS across untrusted networks.
+
+### GET /reader/v1/reservations
+
+Uses the authenticated reader's registered tool; callers cannot select a tool.
+Returns `toolId`, `shopId`, `reservable`, UTC-millisecond `serverTime` and
+`snapshotAt`, `complete`, `next`, `hintTopics`, and `reservations`.
+Effective reservability includes direct tool, reservable group/shop, and existing
+applicable future bookings. A negative result can be cached for 24 hours.
+
+Each summary has `id`, `memberId`, bounded `name`, `startAt`, `endAt`,
+`status`, `revision`, `arrivedAt` (zero if absent), and `monitored`.
+Approved records satisfy `end_at > now`, `start_at <= now + 4h`, and expanded
+`tool_ids` membership or whole-shop scope. Names never establish attendance.
+
+Pages hold at most 32 summaries. Pass `at=snapshotAt&after=next` for the next
+page, within two minutes of the snapshot. Start/ID ordering is deterministic;
+the time is fixed but MongoDB edits may happen between pages, so consumers reconcile
+on subsequent refreshes. ESP32 caps its inventory at 64 and reports incomplete
+coverage rather than inferring absence. Server lifecycle checks remain authoritative.
+The compound tool/status/time and shop/status/time indexes support the read;
+the integration suite checks actual executionStats on disposable representative data.
+
+### POST /reader/v1/reservations/sync
+
+Body: `{capable: boolean, operations: [...]}`, maximum 16 KiB/16 operations.
+The API substitutes authenticated device identity and forwards to
+`POST /api/internal/reader_reservations/sync`. Each operation contains `kind`,
+`reservationId`, `revision`, and:
+- `monitor`: no extra fields; freeze equipped readers before the arrival cutoff.
+- `claim`: `checkinId`, `observedAt`.
+- `release`: `checkendId`, a voluntary owner logoff.
+- `checkpoint`: `coveredFrom`, `through`, `uncertain`.
+
+Times are UTC milliseconds. Responses contain `serverTime` and `results`
+with `reservationId`, `outcome` (accepted/stale/gone/blocked), and, for existing
+records, `status`/`revision`. Monitoring/checkpoint acknowledgments also return
+`monitored` and nullable `arrivedAt`, so readers can retire resolved expired records.
+Retry network/503 failures and HTTP 409 after
+uploading session events. HTTP 422 rejects invalid scope/window/operations.
+Exact durable claim/release replay is idempotent; changed duplicates conflict.
+No mutation is performed by generic database access from the reader.
+
+Capability changes increment `reservationCoverageRevision`. Tool/role
+configuration changes increment it and retain `previousToolIds`; frozen
+checkpoints cannot become valid again after reconfiguration. Direct operator edits
+to reader role/tool/enabled/capability must also increment this field. Disabled
+firmware on a previously participating reader requires operators to mark capability
+false; old participating bookings remain deferred until ordinary cancellation.
+
+### MQTT and terminal states
+
+Readers subscribe to `readers/all/reservations/refresh` and the four exact UpNext
+topics returned by `hintTopics` (shop/tool current and /UpNext). UpNext payloads
+are unchanged and only prompt a scoped refresh. Reservation/group changes,
+including deletion/resource moves, publish the general nonretained refresh fallback.
+These events and capability advertisements never emit authorization invalidation.
+
+Rails owns `abandoned`, outside active statuses, and retains invoices/fees.
+A booking becomes abandoned only strictly after start+15 minutes and after every
+frozen participant has synchronized certain attendance through the inclusive cutoff.
+Pending/unpaid bookings keep their existing behavior. New indexes also support
+reader participation and immutable session-evidence reconciliation.
