@@ -4,6 +4,7 @@ import {
   effectiveCard,
   validUid,
 } from "../reader-policy";
+import { registerReservationRoutes } from "../reader-reservations";
 import * as h3 from "h3";
 import {
   timingSafeEqual,
@@ -122,6 +123,7 @@ function config(reader: any) {
   };
 }
 export const readerRouter = h3.createRouter();
+registerReservationRoutes(readerRouter, db);
 readerRouter.get(
   "/reader/v1/config",
   h3.defineEventHandler((e) => config(e.context.reader)),
@@ -164,7 +166,10 @@ readerRouter.post(
               toolId,
               enrollmentEnabled: b.enrollmentEnabled,
             },
-            $addToSet: { previousNames: e.context.reader.name },
+            $addToSet: { previousNames: e.context.reader.name,
+              ...(e.context.reader.toolId ? {previousToolIds:e.context.reader.toolId.toString()} : {}) },
+            ...(e.context.reader.role!==b.role || String(e.context.reader.toolId || '')!==String(toolId || '')
+              ? {$inc:{reservationCoverageRevision:1}} : {}),
           },
         );
     } catch (err: any) {
@@ -180,7 +185,18 @@ readerRouter.post(
     });
   }),
 );
-async function cardView(c: any) {
+async function readerScope(reader: any) {
+  const tool = reader.toolId ? await db().collection("tools").findOne({_id:reader.toolId}) : null;
+  return {...reader, shopId: tool?.shop_id?.toString()};
+}
+async function toolStatus(reader: any) {
+  const tool = reader.toolId ? await db().collection("tools").findOne({_id:reader.toolId}) : null;
+  const shop = tool ? await db().collection("shops").findOne({_id:tool.shop_id}) : null;
+  return { enabled: !!tool && !!shop && !tool.disabled && !shop.disabled,
+    name: boundedText(tool?.name,96), shopId: shop?._id.toString() || "", shopName: boundedText(shop?.name,96),
+    toolOutOfService: !!tool?.out_of_service, shopOutOfService: !!shop?.out_of_service };
+}
+async function cardView(c: any, reader?: any) {
   const member = await db().collection("members").findOne({ _id: c.member_id });
   const credential = await db().collection("nfc_card_credentials").findOne({
     _id: c._id,
@@ -193,6 +209,10 @@ async function cardView(c: any) {
     _id: c._id.toString(),
     uid: c.uid,
     holder: boundedText(c.holder, 256),
+    firstName: boundedText(member?.firstname, 64),
+    lastInitial: boundedText(Array.from(String(member?.lastname || ""))[0] || "", 4),
+    managesTool: !!reader && (member?.role === "admin" || member?.role === "board_member" ||
+      (member?.role === "resource_manager" && (member.resource_manager_shop_ids || []).map(String).includes(reader.shopId))),
     ...effectiveCard(c, member),
     memberId: c.member_id?.toString(),
     credential: material
@@ -204,25 +224,25 @@ async function cardView(c: any) {
       : null,
   };
 }
+async function currentGrant(reader: any, memberId: string | undefined) {
+ if (reader.role !== "tool" || !memberId) return null;
+ const tool = await toolStatus(reader); if (!tool.enabled) return null;
+ let best: any = null;
+ for await (const row of db().collection("tool_checkouts").find({tool_id:reader.toolId,member_id:new ObjectId(memberId),revoked_at:null,superseded_by_id:null})) {
+   const until=checkoutUntil(row.expires_on);
+   if (until>Date.now() && (!best || until>best.until)) best={memberId,checkoutId:row._id.toString(),until};
+ }
+ return best;
+}
 readerRouter.post(
   "/reader/v1/cards/lookup",
   h3.defineEventHandler(async (e) => {
     const c = await cardFor((await body(e)).uid);
-    return { document: c ? await cardView(c) : null, serverTime: Date.now() };
+    return { grant: await currentGrant(e.context.reader, c?.member_id?.toString()), document: c ? await cardView(c, await readerScope(e.context.reader)) : null, tool: await toolStatus(e.context.reader), serverTime: Date.now() };
   }),
 );
-readerRouter.get(
-  "/reader/v1/snapshot",
-  h3.defineEventHandler(async (e) => {
-    const rows = await db().collection("cards").find({}).limit(301).toArray();
-    if (
-      rows.length > 300 ||
-      new Set(rows.map((c) => c.uid)).size !== rows.length
-    )
-      fail(409, "Card cache capacity or duplicate UID violation");
-    const cards = await Promise.all(
-      rows.filter((c) => validUid(c.uid)).map(cardView),
-    );
+async function readerSnapshot(e: h3.H3Event, recent?: string[]) {
+    const scope = await readerScope(e.context.reader);
     let grants: any[] = [],
       available = false,
       toolName = "";
@@ -240,7 +260,7 @@ readerRouter.get(
         !tool.out_of_service &&
         !shop.out_of_service;
       toolName = boundedText(tool?.name, 96);
-      if (available) {
+      if (tool && shop && !tool.disabled && !shop.disabled) {
         const rows = await db().collection("tool_checkouts").find({
           tool_id: tool!._id,
           revoked_at: null,
@@ -260,18 +280,41 @@ readerRouter.get(
             });
         }
         grants = [...byMember.values()];
-        if (grants.length > 150) fail(409, "Checkout cache capacity exceeded");
+
       }
     }
+    const allowed = new Set(grants.map(g => g.memberId));
+    const now = Date.now();
+    const cards: any[] = [];
+    const seen = new Set<string>();
+    // Iterate instead of materializing the whole collection on the API host.
+    for await (const row of db().collection("cards").find({validity:"activeMember", expiry:{$gt:now}})) {
+      if (!validUid(row.uid)) continue;
+      const card = await cardView(row, scope);
+      if (card.validity !== "activeMember" || card.expiry <= now) continue;
+      if (scope.role === "tool" && !card.managesTool && !allowed.has(card.memberId)) continue;
+      if (recent && !card.managesTool && !recent.includes(card.uid)) continue;
+      if (seen.has(card.uid) || await db().collection("cards").countDocuments({uid:card.uid}, {limit:2}) > 1) fail(409, "Duplicate eligible card UID");
+      seen.add(card.uid); cards.push(card);
+      if (cards.length > (recent ? 128 : 300)) fail(409, "Eligible card cache capacity exceeded");
+    }
+    const members = new Set(cards.map(c => c.memberId));
+    grants = grants.filter(g => members.has(g.memberId));
+    if (grants.length > (recent ? 128 : 150)) fail(409, "Checkout cache capacity exceeded");
     return {
       config: config(e.context.reader),
       cards,
       grants,
-      tool: { available, name: toolName },
+      tool: { ...(await toolStatus(e.context.reader)), available, name: toolName },
       serverTime: Date.now(),
     };
-  }),
-);
+}
+readerRouter.get("/reader/v1/snapshot", h3.defineEventHandler(e => readerSnapshot(e)));
+readerRouter.post("/reader/v1/snapshot/recent", h3.defineEventHandler(async e => {
+  const input = await body(e);
+  if (!Array.isArray(input.uids) || input.uids.length > 128 || input.uids.some((v: unknown) => !validUid(v)) || new Set(input.uids).size !== input.uids.length) fail(422, "Unique UID list required (maximum 128)");
+  return readerSnapshot(e, input.uids);
+}));
 // Fence both card assignment and station configuration inside the transaction.
 // A concurrent Rails release/reassignment or station disable conflicts with these writes.
 async function enrollmentTransaction<T>(
@@ -414,7 +457,7 @@ readerRouter.post(
     const b = await body(e),
       d = b.document;
     if (
-      !["checkins", "rejections"].includes(b.collection) ||
+      !["checkins", "checkend", "rejections"].includes(b.collection) ||
       !d ||
       !/^[0-9a-f]{24}$/i.test(d._id || "") ||
       !Number.isSafeInteger(d.time) ||
@@ -437,7 +480,25 @@ readerRouter.post(
       d.where !== (e.context.reader.where || "doorboto32")
     )
       fail(403, "Reader identity mismatch");
+    const extra: Record<string, any> = {};
+    for (const key of ["memberId","toolId","shopId","toolName","shopName"]) {
+      if (d[key] !== undefined) {
+        if (typeof d[key] !== "string" || d[key].length > 256) fail(422,"Invalid tool event context");
+        extra[key] = d[key];
+      }
+    }
+    if (b.collection === "checkend") {
+      if (!/^[0-9a-f]{24}$/i.test(d.checkinId || "") || typeof d.kicked !== "boolean") fail(422,"Invalid checkend");
+      extra.checkinId=d.checkinId.toLowerCase(); extra.kicked=d.kicked; extra.kickedBy=null;
+      if (d.kicked) {
+        const actor=d.kickedBy;
+        if (!actor || typeof actor.memberId !== "string" || !/^[0-9a-f]{24}$/i.test(actor.memberId) || typeof actor.holder !== "string" || actor.holder.length>256) fail(422,"Invalid kick actor");
+        uid(actor.uid);
+        extra.kickedBy={memberId:actor.memberId,uid:actor.uid,holder:actor.holder};
+      }
+    }
     const document = {
+      ...extra,
       _id: new ObjectId(d._id),
       uid: d.uid,
       holder: d.holder,
@@ -452,24 +513,27 @@ readerRouter.post(
       deviceId: e.context.reader._id,
     };
     const collection = db().collection(b.collection);
-    const existing = await collection.findOne({ _id: document._id });
-    if (
-      existing &&
-      (existing.deviceId?.toString() !== document.deviceId.toString() ||
-        existing.uid !== document.uid ||
-        Number(existing.time) !== d.time ||
-        existing.validity !== document.validity ||
-        existing.holder !== document.holder ||
-        existing.reason !== document.reason ||
-        existing.reader !== document.reader ||
-        existing.where !== document.where)
-    )
-      fail(409, "Conflicting event ID");
+    const identity = b.collection === "checkend"
+      ? { $or: [{_id:document._id}, {deviceId:document.deviceId, checkinId:extra.checkinId}] }
+      : {_id:document._id};
+    const extraFields = ["memberId","toolId","shopId","toolName","shopName","checkinId","kicked","kickedBy"];
+    const sameEvent = (existing: any) => existing &&
+      existing._id.toString() === document._id.toString() &&
+      existing.deviceId?.toString() === document.deviceId.toString() &&
+      existing.uid === document.uid && Number(existing.time) === d.time &&
+      existing.validity === document.validity && existing.holder === document.holder &&
+      existing.reason === document.reason && existing.reader === document.reader && existing.where === document.where &&
+      extraFields.every(key => JSON.stringify(existing[key]) === JSON.stringify(extra[key]));
+    const existing = await collection.findOne(identity);
+    if (existing && !sameEvent(existing)) fail(409, "Conflicting event ID or session end");
     if (!existing) {
       try {
         await collection.insertOne(document);
       } catch (error: any) {
-        if (error.code === 11000) fail(409, "Concurrent event; retry");
+        if (error.code === 11000) {
+          if (sameEvent(await collection.findOne(identity))) return {acknowledged:true,id:d._id};
+          fail(409,"Conflicting event ID or session end");
+        }
         throw error;
       }
     }
