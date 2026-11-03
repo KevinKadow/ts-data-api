@@ -5,11 +5,11 @@ import { boundedText } from "./reader-policy";
 const error = (statusCode: number, message: string): never => {
   throw h3.createError({ statusCode, message });
 };
-export function reservationFilter(tool: any, now: number) {
+export function reservationFilter(tool: any, now: number, hours = 4) {
   return {
     status: "approved",
     end_at: { $gt: new Date(now) },
-    start_at: { $lte: new Date(now + 14400000) },
+    start_at: { $lte: new Date(now + hours * 3600000) },
     $or: [
       { reservation_scope: "tools", tool_ids: tool._id.toString() },
       { reservation_scope: "shop", shop_id: tool.shop_id },
@@ -35,7 +35,10 @@ export function registerReservationRoutes(
       const at = query.at === undefined ? Date.now() : Number(query.at);
       if (!Number.isSafeInteger(at) || Math.abs(Date.now() - at) > 120000)
         error(422, "Invalid snapshot time");
-      const filter: any = reservationFilter(tool, at);
+      const hours = query.hours === undefined ? 4 : Number(query.hours);
+      const limit = query.limit === undefined ? 32 : Number(query.limit);
+      if (![4,8].includes(hours) || ![16,32].includes(limit)) error(422, "Invalid reservation limits");
+      const filter: any = reservationFilter(tool, at, hours);
       const future = { ...filter, start_at: { $exists: true } };
       const [group, existing] = await Promise.all([
         db
@@ -80,7 +83,6 @@ export function registerReservationRoutes(
             .find(filter, {
               projection: {
                 member_id: 1,
-                title: 1,
                 start_at: 1,
                 end_at: 1,
                 status: 1,
@@ -91,11 +93,11 @@ export function registerReservationRoutes(
               },
             })
             .sort({ start_at: 1, _id: 1 })
-            .limit(33)
+            .limit(limit + 1)
             .toArray()
         : [];
-      const more = rows.length > 32;
-      const page = rows.slice(0, 32);
+      const more = rows.length > limit;
+      const page = rows.slice(0, limit);
       const ids = [
         ...new Map(
           page.map((r) => [String(r.member_id), r.member_id]),

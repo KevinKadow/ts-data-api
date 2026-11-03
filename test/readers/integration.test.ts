@@ -50,6 +50,23 @@ describe('tool reservation reads and lifecycle forwarding', () => {
     expect(second.body.reservations).toHaveLength(3); expect(second.body.complete).toBe(true);
     expect(new Set([...first.body.reservations,...second.body.reservations].map(r=>r.id)).size).toBe(35);
   });
+  test('eight-hour horizon and seventeenth-row lookahead preserve old defaults',async()=>{
+    const {db,toolId,shopId}=await toolReader(), now=Date.now();
+    const common={member_id:memberId,shop_id:shopId,status:'approved',reservation_scope:'tools',tool_ids:[String(toolId)],end_at:new Date(now+36000000)};
+    await db.collection('reservations').insertMany(Array.from({length:16},(_,i)=>({...common,start_at:new Date(now+(i+1)*1800000),title:'not sent'})));
+    let result=await call(`/reader/v1/reservations?at=${now}&hours=8&limit=16`);
+    expect(result.body.reservations).toHaveLength(16);expect(result.body.complete).toBe(true);
+    expect(result.body.reservations[15].startAt).toBe(now+28800000);
+    expect(JSON.stringify(result.body)).not.toContain('not sent');
+    await db.collection('reservations').insertOne({...common,start_at:new Date(now+28800001)});
+    expect((await call(`/reader/v1/reservations?at=${now}&hours=8&limit=16`)).body.complete).toBe(true);
+    await db.collection('reservations').insertOne({...common,start_at:new Date(now-1)});
+    result=await call(`/reader/v1/reservations?at=${now}&hours=8&limit=16`);
+    expect(result.body.reservations).toHaveLength(16);expect(result.body.complete).toBe(false);expect(result.body.next).toBeTruthy();
+    expect((await call(`/reader/v1/reservations?at=${now}`)).body.reservations).toHaveLength(9);
+    expect((await call('/reader/v1/reservations?hours=9&limit=16')).status).toBe(422);
+    expect((await call('/reader/v1/reservations?hours=8&limit=17')).status).toBe(422);
+  });
   test('uses bounded indexed tool/shop scans against representative unrelated history',async()=>{
     const {db,toolId,shopId}=await toolReader(), now=Date.now();
     const reservations=db.collection('reservations');
@@ -60,11 +77,13 @@ describe('tool reservation reads and lifecycle forwarding', () => {
     await reservations.insertMany([
       {shop_id:shopId,tool_ids:[String(toolId)],reservation_scope:'tools',status:'approved',start_at:new Date(now),end_at:new Date(now+3600000)},
       {shop_id:shopId,tool_ids:[],reservation_scope:'shop',status:'approved',start_at:new Date(now),end_at:new Date(now+3600000)}]);
-    const plan=await reservations.find(reservationFilter({_id:toolId,shop_id:shopId},now)).sort({start_at:1,_id:1}).limit(33).explain('executionStats');
+    for(const hours of [4,8]) {
+    const plan=await reservations.find(reservationFilter({_id:toolId,shop_id:shopId},now,hours)).sort({start_at:1,_id:1}).limit(hours===8?17:33).explain('executionStats');
     expect(plan.executionStats.nReturned).toBe(2);
     expect(plan.executionStats.totalDocsExamined).toBeLessThan(20);
     expect(JSON.stringify(plan.queryPlanner.winningPlan)).toContain('IXSCAN');
     expect(JSON.stringify(plan.queryPlanner.winningPlan)).not.toContain('COLLSCAN');
+    }
   });
   test('recognizes a reservable group and returns explicit negative capability',async()=>{
     const {db,toolId,shopId}=await toolReader();
@@ -161,7 +180,7 @@ afterAll(async () => {
   const { dataSources } = require("../../src/mdb");
   await Promise.all(Object.values(dataSources).map((c: any) => c.close()));
   if (repl) await repl.stop();
-});
+}, 30000); // Windows MongoDB shutdown can exceed Jest's five-second default.
 test("rejects missing proxy identity and unrestricted legacy access", async () => {
   expect(
     (
@@ -464,4 +483,37 @@ test("filter expiry before capacity and include privileged cards in recent snaps
  await db.collection("members").updateOne({_id:memberId},{$set:{expirationTime:1}});
  expect((await call("/reader/v1/snapshot/recent",{uids:[]})).body.cards).toHaveLength(0);
  expect((await call("/reader/v1/snapshot/recent",{uids:["bad"]})).status).toBe(422);
+});
+
+test("recent snapshot respects byte/count limits without truncating privileged cards",async()=>{
+ const db=client.db('reader_test');
+ await db.collection('members').updateOne({_id:memberId},{$set:{role:'board_member',firstname:'\u6e2c\u8a66'.repeat(40)}});
+ const first=await call('/reader/v1/snapshot/recent',{uids:[],cardLimit:1,checkoutLimit:1,responseBytes:32768});
+ expect(first.status).toBe(200);expect(first.body.cards).toHaveLength(1);
+ const encoded=JSON.stringify(first.body), bytesRequired=Buffer.byteLength(encoded);
+ expect(bytesRequired).toBeGreaterThan(encoded.length);
+ expect((await call('/reader/v1/snapshot/recent',{uids:[],responseBytes:bytesRequired-1})).status).toBe(409);
+ expect((await call('/reader/v1/snapshot/recent',{uids:[],responseBytes:bytesRequired+100})).status).toBe(200);
+ await db.collection('cards').insertOne({uid:'ABCDEF12',member_id:memberId,validity:'activeMember',expiry:Date.now()+86400000});
+ const conflict=await call('/reader/v1/snapshot/recent',{uids:[],cardLimit:1});
+ expect(conflict.status).toBe(409);expect(conflict.body.message).toBe('Eligible card cache capacity exceeded');
+ const bytes=await call('/reader/v1/snapshot/recent',{uids:[],responseBytes:1});
+ expect(bytes.status).toBe(409);expect(bytes.body.message).toBe('Snapshot response byte capacity exceeded');
+ expect((await call('/reader/v1/snapshot/recent',{uids:[],cardLimit:0})).status).toBe(422);
+ expect((await call('/reader/v1/snapshot/recent',{uids:[],responseBytes:524289})).status).toBe(422);
+ expect((await call('/reader/v1/snapshot/recent',{uids:[]})).body.cards).toHaveLength(2);
+});
+
+test("recent checkout ceiling rejects a complete result rather than dropping grants",async()=>{
+ const db=client.db('reader_test'), tool=new ObjectId(), shop=new ObjectId(), other=new ObjectId();
+ await db.collection('shops').insertOne({_id:shop});
+ await db.collection('tools').insertOne({_id:tool,shop_id:shop});
+ await db.collection('nfc_readers').updateOne({_id:readerId},{$set:{role:'tool',toolId:tool}});
+ await db.collection('members').insertOne({_id:other,status:'activeMember',role:'board_member',expirationTime:Date.now()+86400000});
+ await db.collection('cards').insertOne({uid:'ABCDEF12',member_id:other,validity:'activeMember',expiry:Date.now()+86400000});
+ await db.collection('tool_checkouts').insertMany([{tool_id:tool,member_id:memberId},{tool_id:tool,member_id:other}]);
+ const result=await call('/reader/v1/snapshot/recent',{uids:['00112233'],cardLimit:2,checkoutLimit:1});
+ expect(result.status).toBe(409);expect(result.body.message).toBe('Checkout cache capacity exceeded');
+ const full=await call('/reader/v1/snapshot/recent',{uids:['00112233'],cardLimit:2,checkoutLimit:2});
+ expect(full.status).toBe(200);expect(full.body.grants).toHaveLength(2);
 });
