@@ -218,3 +218,20 @@ A booking becomes abandoned only strictly after start+15 minutes and after every
 frozen participant has synchronized certain attendance through the inclusive cutoff.
 Pending/unpaid bookings keep their existing behavior. New indexes also support
 reader participation and immutable session-evidence reconciliation.
+
+## Board-profile request bounds
+
+`POST /reader/v1/snapshot/recent` optionally accepts `cardLimit` (integer 1..300),
+`checkoutLimit` (1..150), and `responseBytes` (1..524288). Omitted fields retain
+128/128/524288. Mandatory privileged cards are included even if not requested;
+card/checkout capacity conflicts remain HTTP 409. A UTF-8 serialized response over
+the requested byte limit returns 409 `Snapshot response byte capacity exceeded`.
+Authorization records are never silently truncated. Firmware can reduce ordinary
+UID requests while retaining its active owner; impossible mandatory sets remain errors.
+
+`GET /reader/v1/reservations?hours=8&limit=16` requests the current/eight-hour window
+and uses a seventeenth-row lookahead to set `complete`/`next`. The only accepted
+horizons are 4/8 hours and page sizes 16/32; omitted fields retain 4/32. Reader/tool
+scope, approved-status filtering, whole-shop bookings and expanded group tools are
+unchanged. Titles are not projected. Existing indexes serve both horizons.
+Deploy this backward-compatible API before firmware requiring these bounds.
