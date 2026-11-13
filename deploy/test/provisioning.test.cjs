@@ -7,7 +7,7 @@ const pki = require("../lib/pki.cjs");
 const ops = require("../lib/operations.cjs");
 const recovery = require("../lib/recovery.cjs");
 const { render } = require("../lib/render.cjs");
-const { parse } = require("../cli.cjs");
+const { main, parse } = require("../cli.cjs");
 const { fs, path } = c;
 const tempBase = process.env.DEPLOY_TEST_TMP || os.tmpdir();
 c.mkdir(tempBase);
@@ -120,6 +120,45 @@ test("render is deterministic and does not rotate any credential", () => {
     c.files(root).map((f) => [f, c.sha(fs.readFileSync(path.join(root, f)))]),
   );
   assert.deepEqual(after, before);
+});
+test("render CLI restores missing headers without changing preserved state", async () => {
+  // Normalize relocatable CA paths before comparing every byte of the state.
+  await main(["render", "--state", root]);
+  const hashes = () =>
+    Object.fromEntries(
+      c.files(root).map((f) => [f, c.sha(fs.readFileSync(path.join(root, f)))]),
+    );
+  const before = hashes();
+  for (const r of s.readers)
+    fs.unlinkSync(path.join(root, "readers", r.id, "secrets.h"));
+  // Export/restore and preflight retain their complete-state requirement.
+  assert.throws(
+    () => ops.validateState(root, c.state(root)),
+    /Missing exported firmware configuration/,
+  );
+  await main(["render", "--state", root]);
+  ops.validateState(root, c.state(root));
+  assert.deepEqual(hashes(), before);
+});
+test("render CLI refuses missing private keys or certificates before recreating headers", async () => {
+  const dir = path.join(root, "readers", s.readers[0].id);
+  const header = path.join(dir, "secrets.h");
+  for (const name of ["key.pem", "cert.pem"]) {
+    const file = path.join(dir, name),
+      bytes = fs.readFileSync(file);
+    fs.unlinkSync(header);
+    fs.unlinkSync(file);
+    try {
+      await assert.rejects(() => main(["render", "--state", root]), {
+        code: "ENOENT",
+      });
+      assert.equal(fs.existsSync(header), false);
+      assert.equal(fs.existsSync(file), false);
+    } finally {
+      c.write(file, bytes);
+      await main(["render", "--state", root]);
+    }
+  }
 });
 test("TLS purpose, SAN and revocation are enforced by actual OpenSSL", () => {
   const r = s.readers[0],

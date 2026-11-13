@@ -32,7 +32,8 @@ function secretFile(file) {
   assert(value, "Secret input is empty");
   return value;
 }
-function validateState(root, s) {
+// Validate preserved inputs independently of files that render can regenerate.
+function validateSourceState(root, s) {
   validateConfig(s.config);
   assert(/^[a-f0-9]{32}$/.test(s.deploymentId), "Invalid deployment identity");
   assert(
@@ -97,10 +98,6 @@ function validateState(root, s) {
         r.webPassword.length >= 32,
       "Missing management credentials",
     );
-    assert(
-      fs.existsSync(path.join(root, "readers", r.id, "secrets.h")),
-      "Missing exported firmware configuration",
-    );
   }
   if (s.additionalServerCA)
     assert(
@@ -114,6 +111,14 @@ function validateState(root, s) {
     "Missing build provenance",
   );
   pki.validate(root, s);
+}
+function validateState(root, s) {
+  validateSourceState(root, s);
+  for (const r of s.readers)
+    assert(
+      fs.existsSync(path.join(root, "readers", r.id, "secrets.h")),
+      "Missing exported firmware configuration",
+    );
 }
 function init(root, o) {
   assert(
@@ -569,6 +574,7 @@ module.exports = {
   init,
   addReader,
   validateState,
+  validateSourceState,
   save,
   secretFile,
   withDB,

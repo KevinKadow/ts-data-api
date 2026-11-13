@@ -233,6 +233,9 @@ fingerprint, web password, and immutable device ID. The certificate CN is that I
 Enrollment is initially disabled. Repeating `add-reader` with an existing name or
 hostname fails; use `render` to recover the existing header. Registration is
 idempotent for unchanged records and refuses to overwrite live configuration changes.
+`render` can recreate a missing `readers/<ObjectId>/secrets.h` from the preserved
+inventory, certificates, and private keys. Missing source credentials still fail
+validation; rendering never generates replacement keys.
 
 Each later reader issuance creates its own 20-year issuer, appended to the trust
 and CRL bundles. This prevents a new reader's certificate from outliving its CA.

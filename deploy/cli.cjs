@@ -105,7 +105,7 @@ No command initializes physical cards, erases readers, or programs eFuses.`);
         break;
       case "render": {
         const s = state(root);
-        ops.validateState(root, s);
+        ops.validateSourceState(root, s);
         for (const ca of [{ name: s.serverCA }, ...s.readerCAs])
           pki.refreshConfig(path.join(root, "pki", ca.name));
         render(root, s);
