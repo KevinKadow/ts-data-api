@@ -131,3 +131,9 @@ dist
 
 # Build Files
 build/
+
+# Provisioning, credentials and recovery exports
+.deployment*/
+deployment-input/
+deployment-transfer/
+*.tar.age

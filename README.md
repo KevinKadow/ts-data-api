@@ -10,6 +10,10 @@ This project provides a TypeScript implementation inspired by the deprecated [At
 
 Restricted device endpoints, mTLS gateway authentication, enrollment, tool grants and audit replay are documented in [READER_API.md](READER_API.md). The generic JWT/full-access behavior described below applies to legacy endpoints, not reader certificates.
 
+For a new reader deployment, use the [Docker Compose deployment and recovery guide](deploy/README.md).
+It includes HAProxy, Mosquitto, 20-year certificate issuance, per-reader firmware
+headers, and encrypted export/restore of master/private keys and database snapshots.
+
 ## Executing
 
 To run this application, ensure you have [Node.js](https://nodejs.org/en/download) installed. Then, execute the following commands in the project's root directory:

@@ -241,7 +241,7 @@ readerRouter.post(
     return { grant: await currentGrant(e.context.reader, c?.member_id?.toString()), document: c ? await cardView(c, await readerScope(e.context.reader)) : null, tool: await toolStatus(e.context.reader), serverTime: Date.now() };
   }),
 );
-async function readerSnapshot(e: h3.H3Event, recent?: string[]) {
+async function readerSnapshot(e: h3.H3Event, recent?: string[], limits = { cards: recent ? 128 : 300, checkouts: recent ? 128 : 150, bytes: 524288 }) {
     const scope = await readerScope(e.context.reader);
     let grants: any[] = [],
       available = false,
@@ -296,24 +296,31 @@ async function readerSnapshot(e: h3.H3Event, recent?: string[]) {
       if (recent && !card.managesTool && !recent.includes(card.uid)) continue;
       if (seen.has(card.uid) || await db().collection("cards").countDocuments({uid:card.uid}, {limit:2}) > 1) fail(409, "Duplicate eligible card UID");
       seen.add(card.uid); cards.push(card);
-      if (cards.length > (recent ? 128 : 300)) fail(409, "Eligible card cache capacity exceeded");
+      if (cards.length > limits.cards) fail(409, "Eligible card cache capacity exceeded");
     }
     const members = new Set(cards.map(c => c.memberId));
     grants = grants.filter(g => members.has(g.memberId));
-    if (grants.length > (recent ? 128 : 150)) fail(409, "Checkout cache capacity exceeded");
-    return {
+    if (grants.length > limits.checkouts) fail(409, "Checkout cache capacity exceeded");
+    const result = {
       config: config(e.context.reader),
       cards,
       grants,
       tool: { ...(await toolStatus(e.context.reader)), available, name: toolName },
       serverTime: Date.now(),
     };
+    if (Buffer.byteLength(JSON.stringify(result)) > limits.bytes) fail(409, "Snapshot response byte capacity exceeded");
+    return result;
 }
 readerRouter.get("/reader/v1/snapshot", h3.defineEventHandler(e => readerSnapshot(e)));
 readerRouter.post("/reader/v1/snapshot/recent", h3.defineEventHandler(async e => {
   const input = await body(e);
   if (!Array.isArray(input.uids) || input.uids.length > 128 || input.uids.some((v: unknown) => !validUid(v)) || new Set(input.uids).size !== input.uids.length) fail(422, "Unique UID list required (maximum 128)");
-  return readerSnapshot(e, input.uids);
+  const limit = (key: string, fallback: number, max: number) => {
+    const value = input[key] === undefined ? fallback : input[key];
+    if (!Number.isSafeInteger(value) || value < 1 || value > max) fail(422, `Invalid ${key}`);
+    return value;
+  };
+  return readerSnapshot(e, input.uids, { cards: limit("cardLimit",128,300), checkouts: limit("checkoutLimit",128,150), bytes: limit("responseBytes",524288,524288) });
 }));
 // Fence both card assignment and station configuration inside the transaction.
 // A concurrent Rails release/reassignment or station disable conflicts with these writes.
