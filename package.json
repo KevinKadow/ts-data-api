@@ -9,7 +9,8 @@
     "test": "npx jest",
     "test:client": "npx ts-node ./test/client.ts",
     "test:file": "npx jest --coverage=false --verbose",
-    "test:disposable": "node scripts/test-disposable.cjs"
+    "test:disposable": "node scripts/test-disposable.cjs",
+    "test:deployment": "node --test deploy/test/provisioning.test.cjs deploy/test/database.test.cjs"
   },
   "keywords": [
     "mongodb",

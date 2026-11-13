@@ -1,0 +1,17 @@
+{
+  "name": "makerspace-readers",
+  "apiHost": "reader-api.example.org",
+  "mqttHost": "reader-mqtt.example.org",
+  "mqttServiceHost": "reader-mqtt-service.example.org",
+  "managementDomain": "readers.example.org",
+  "readerBindAddress": "192.168.20.10",
+  "managementBindAddress": "192.168.10.10",
+  "managementAllowedCidrs": ["192.168.10.0/24"],
+  "apiPort": 443,
+  "managementPort": 8443,
+  "mqttPort": 8883,
+  "mqttServicePort": 8884,
+  "dataSource": "makerspace",
+  "database": "makerspace",
+  "railsUrl": "https://rails.internal.example.org"
+}

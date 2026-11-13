@@ -1,0 +1,117 @@
+name: ${COMPOSE_PROJECT_NAME:?Run deployment init first}
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+x-service: &service
+  restart: unless-stopped
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging: *logging
+services:
+  api:
+    <<: *service
+    build: { context: ., target: api }
+    image: ${COMPOSE_PROJECT_NAME}-api:${DEPLOY_REVISION:-local}
+    init: true
+    env_file: ["${DEPLOY_STATE:-./.deployment}/runtime/api.env"]
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      SERVER_PORT: "8080"
+      DATA_SOURCES_FILE: /run/secrets/data-sources
+      JWT_SECRET_FILE: /run/secrets/jwt
+      READER_PROXY_SECRET_FILE: /run/secrets/proxy
+      READER_KEY_ENCRYPTION_KEY_FILE: /run/secrets/card-key
+      READER_MQTT_PASSWORD_FILE: /run/secrets/mqtt-api
+      READER_RESERVATION_SERVICE_SECRET_FILE: /run/secrets/reservations
+      NODE_EXTRA_CA_CERTS: /run/secrets/server-ca
+    secrets:
+      - { source: data_sources, target: data-sources }
+      - { source: jwt, target: jwt }
+      - { source: proxy, target: proxy }
+      - { source: card_key, target: card-key }
+      - { source: mqtt_api, target: mqtt-api }
+      - { source: reservations, target: reservations }
+      - { source: server_ca, target: server-ca }
+    networks: [api_private, mqtt_private, api_egress]
+    healthcheck:
+      test: [CMD, node, deploy/runtime/health.cjs]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+  haproxy:
+    <<: *service
+    image: haproxy:3.2.26-alpine@sha256:1c3568e520453cc8ba98c39501febcf450429c80e6cc27ecad779961d76e597c
+    user: "99:99"
+    entrypoint: [/bin/sh, /opt/deploy/haproxy-start.sh]
+    command: [haproxy, -W, -db, -f, /usr/local/etc/haproxy/haproxy.cfg]
+    ports:
+      - "${READER_BIND_ADDRESS:?}:${API_PORT:-443}:8443"
+      - "${MANAGEMENT_BIND_ADDRESS:?}:${MANAGEMENT_PORT:-8443}:9443"
+    volumes:
+      - ./deploy/runtime/haproxy-start.sh:/opt/deploy/haproxy-start.sh:ro
+      - ${DEPLOY_STATE:-./.deployment}/runtime/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    secrets:
+      - { source: proxy, target: proxy }
+      - { source: api_pem, target: api-server.pem }
+      - { source: reader_ca, target: reader-ca.pem }
+      - { source: reader_crl, target: reader-crl.pem }
+    networks: [api_private, gateway_egress]
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8404/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  mosquitto:
+    <<: *service
+    image: eclipse-mosquitto:2.0.22@sha256:81a6193ae693942a3231cd3ac52875b02b7e3a19da671b2fb4b55cc874c5b279
+    user: "1883:1883"
+    ports:
+      - "${READER_BIND_ADDRESS:?}:${MQTT_PORT:-8883}:8883"
+      - "${MANAGEMENT_BIND_ADDRESS:?}:${MQTT_SERVICE_PORT:-8884}:8884"
+    volumes:
+      - ${DEPLOY_STATE:-./.deployment}/runtime/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ${DEPLOY_STATE:-./.deployment}/runtime/readers.acl:/mosquitto/config/readers.acl:ro
+      - ${DEPLOY_STATE:-./.deployment}/runtime/services.acl:/mosquitto/config/services.acl:ro
+      - broker_data:/mosquitto/data
+    secrets:
+      - { source: broker_cert, target: broker.crt }
+      - { source: broker_key, target: broker.key }
+      - { source: reader_ca, target: reader-ca.pem }
+      - { source: reader_crl, target: reader-crl.pem }
+      - { source: mqtt_passwords, target: mqtt-passwords }
+    networks: [mqtt_private, broker_egress]
+    healthcheck:
+      # Local TCP liveness; verify performs authenticated TLS/ACL checks.
+      test: [CMD-SHELL, "nc -z 127.0.0.1 8883"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  api_private: { internal: true }
+  mqtt_private: { internal: true }
+  api_egress: {}
+  gateway_egress: {}
+  broker_egress: {}
+volumes:
+  broker_data: {}
+secrets:
+  data_sources:
+    { file: "${DEPLOY_STATE:-./.deployment}/runtime/secrets/data-sources" }
+  jwt: { file: "${DEPLOY_STATE:-./.deployment}/runtime/secrets/jwt" }
+  proxy: { file: "${DEPLOY_STATE:-./.deployment}/runtime/secrets/proxy" }
+  card_key: { file: "${DEPLOY_STATE:-./.deployment}/runtime/secrets/card-key" }
+  mqtt_api: { file: "${DEPLOY_STATE:-./.deployment}/runtime/secrets/mqtt-api" }
+  reservations:
+    { file: "${DEPLOY_STATE:-./.deployment}/runtime/secrets/reservations" }
+  server_ca: { file: "${DEPLOY_STATE:-./.deployment}/runtime/server-ca.pem" }
+  api_pem: { file: "${DEPLOY_STATE:-./.deployment}/runtime/api-server.pem" }
+  reader_ca: { file: "${DEPLOY_STATE:-./.deployment}/runtime/reader-ca.pem" }
+  reader_crl: { file: "${DEPLOY_STATE:-./.deployment}/runtime/reader-crl.pem" }
+  broker_cert: { file: "${DEPLOY_STATE:-./.deployment}/runtime/broker.crt" }
+  broker_key: { file: "${DEPLOY_STATE:-./.deployment}/runtime/broker.key" }
+  mqtt_passwords:
+    { file: "${DEPLOY_STATE:-./.deployment}/runtime/mqtt-passwords" }

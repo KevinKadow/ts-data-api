@@ -1,0 +1,21 @@
+# Allow only build inputs. Keep deployment state outside these source directories.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+!scripts/
+!scripts/reader-indexes.cjs
+!deploy/
+!deploy/cli.cjs
+!deploy/images.json
+!deploy/deployment.example.json
+!deploy/reader.example.json
+!deploy/lib/
+!deploy/lib/*.cjs
+!deploy/runtime/
+!deploy/runtime/*.cjs
+!deploy/runtime/*.sh
+!deploy/test/
+!deploy/test/*.cjs

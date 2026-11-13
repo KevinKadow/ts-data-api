@@ -1,0 +1,10 @@
+{
+  "name": "workshop-reader-01",
+  "role": "test",
+  "toolId": null,
+  "where": "workshop",
+  "board": "waveshare",
+  "managementHost": "workshop-reader-01.readers.example.org",
+  "managementAddress": "192.168.20.101",
+  "production": false
+}

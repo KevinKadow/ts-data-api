@@ -1,0 +1,62 @@
+name: Reader deployment validation
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  recovery-and-compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm }
+      - run: npm ci
+      - name: Install test crypto and MongoDB tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age openssl
+          curl -fsSL https://pgp.mongodb.com/server-8.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/mongodb.gpg] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse' | sudo tee /etc/apt/sources.list.d/mongodb.list
+          sudo apt-get update
+          sudo apt-get install -y mongodb-database-tools
+      - name: Certificates, deterministic rendering and encrypted recovery
+        run: node --test deploy/test/provisioning.test.cjs deploy/test/database.test.cjs
+      - name: Actual Compose, mTLS, MQTT ACL and management integration
+        env: { RUN_DEPLOY_CONTAINER_TESTS: "1" }
+        run: node deploy/test/containers.cjs
+      - name: Whitespace and syntax
+        run: |
+          bash -n deploy/deploy.sh deploy/runtime/haproxy-start.sh
+          git diff --check
+  generated-firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [waveshare, olimex, qtpy]
+        reservations: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm }
+      - run: npm ci
+      - uses: actions/checkout@v4
+        with:
+          repository: ManchesterMakerspace/makerspace-reader-esp32
+          path: .cache/reader
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install pinned firmware dependencies
+        shell: pwsh
+        run: ./.cache/reader/scripts/setup.ps1 -ArduinoData (Join-Path $env:RUNNER_TEMP 'reader-arduino')
+      - name: Generate real-shaped test credentials
+        run: node deploy/test/firmware-fixture.cjs '${{ matrix.board }}' .cache/reader/MakerspaceReader/secrets.h
+      - name: Compile staged board with generated certificate header
+        shell: pwsh
+        run: |
+          $fqbn = switch ('${{ matrix.board }}') {
+            'waveshare' {'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=custom,DebugLevel=info'}
+            'olimex' {'esp32:esp32:esp32-poe:FlashSize=4M,PartitionScheme=custom,DebugLevel=info'}
+            'qtpy' {'esp32:esp32:adafruit_qtpy_esp32s3_n4r2:PSRAM=enabled,PartitionScheme=default,USBMode=hwcdc,DebugLevel=info'}
+          }
+          ./.cache/reader/scripts/build.ps1 -Reservations ${{ matrix.reservations }} -Fqbn $fqbn
